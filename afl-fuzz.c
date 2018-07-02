@@ -866,6 +866,93 @@ EXP_ST void read_bitmap(u8* fname) {
 
 }
 
+#define FTR_FLAG_PACK 4
+
+#ifdef __x86_64__
+
+#define MASK_FTR     0xAAAAAAAAAAAAAAAAL
+#define MASK_VISITED 0x5555555555555555L
+
+#else
+
+#define MASK_FTR     0xAAAAAAAAL
+#define MASK_VISITED 0x55555555L
+
+#endif
+
+//TODO: place has_new_frontier in code, then compute a score/ probability based on the frontier *proximity*
+
+static inline u8 has_new_frontier(u8* ftr_flag, u8* ftr_size) {
+#ifdef __x86_64__
+
+  u64* current = (u64*)(trace_bits + MAP_SIZE);
+  u64* current_hits = (u64*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE + MAP_SIZE);
+  u64* flag  = (u64*)ftr_flag;
+  u64* sizes  = (u64*)(ftr_size + MAP_SIZE);
+
+  u64 ftr_bit;
+
+  u32  i = (MAP_FTR_SIZE >> 3);
+
+#else
+
+  u32* current = (u32*)(trace_bits + MAP_SIZE);
+  u32* current_hits = (u32*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE + MAP_SIZE);
+  u32* flag  = (u32*)ftr_flag;
+  u32* sizes  = (u32*)(ftr_size + MAP_SIZE);
+
+  u32 ftr_bit;
+
+  u32  i = (MAP_FTR_SIZE >> 2);
+
+#endif /* ^__x86_64__ */
+
+  u8 ret = 0;
+
+  while (i--) {
+
+    current_hits -= FTR_FLAG_PACK;
+    sizes -= FTR_FLAG_PACK;
+
+    /* Optimize for unreachable locations. */
+
+    if (likely(!*current))
+
+      continue;
+
+    /* Test whether if the FRONTIER mask is set (and not already visited) AND
+       whether this is already visited in the global flags. */
+
+    ftr_bit = ((*current & MASK_FTR) >> 1) ^ (*current & MASK_VISITED);
+
+    if (unlikely(ftr_bit) && unlikely(ftr_bit & ~*flag)) {
+
+      ret = 1;
+
+      for (u8 j = 0; j < FTR_FLAG_PACK; j++) {
+
+        /* Approximate maximum of the sizes, without much loss of performance */
+
+        current_hits[i * FTR_FLAG_PACK + j] |= sizes[i * FTR_FLAG_PACK + j];
+
+      }
+
+    }
+
+
+    if (unlikely(*current & *flag)) {
+
+      *current |= *flag;
+
+    }
+
+    current++;
+    flag++;
+
+  }
+
+  return ret;
+}
 
 /* Check if the current execution path brings anything new to the table.
    Update virgin bits to reflect the finds. Returns 1 if the only change is
@@ -2128,7 +2215,7 @@ EXP_ST void init_forkserver(char** argv) {
   if (child_timed_out)
     FATAL("Timeout while initializing fork server (adjusting -t may help)");
 
-  if (waitpid(forksrv_pid, &status, 0) <= 0)
+  if (waitpid(forksrv_pid, &status, 0) <= 0) //FIXME: should be <
     PFATAL("waitpid() failed");
 
   if (WIFSIGNALED(status)) {

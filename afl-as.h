@@ -104,6 +104,9 @@
 
  */
 
+#define TRAMP_NORM ""
+#define TRAMP_FTR "_ftr"
+
 static const u8* trampoline_fmt_32 =
 
   "\n"
@@ -111,18 +114,33 @@ static const u8* trampoline_fmt_32 =
   "\n"
   ".align 4\n"
   "\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "leal -20(%%esp), %%esp\n"
+#else
   "leal -16(%%esp), %%esp\n"
+#endif
   "movl %%edi,  0(%%esp)\n"
   "movl %%edx,  4(%%esp)\n"
   "movl %%ecx,  8(%%esp)\n"
   "movl %%eax, 12(%%esp)\n"
   "movl $0x%08x, %%ecx\n"
-  "call __afl_maybe_log\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "movl %%ebx, 16(%%esp)\n"
+  "movl $0x%08x, %%ebx\n"
+#endif
+  "call __afl_maybe_log%s\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "movl 16(%%esp), %%ebx\n"
+#endif
   "movl 12(%%esp), %%eax\n"
   "movl  8(%%esp), %%ecx\n"
   "movl  4(%%esp), %%edx\n"
   "movl  0(%%esp), %%edi\n"
-  "leal 16(%%esp), %%esp\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "leal -20(%%esp), %%esp\n"
+#else
+  "leal -16(%%esp), %%esp\n"
+#endif
   "\n"
   "/* --- END --- */\n"
   "\n";
@@ -134,22 +152,36 @@ static const u8* trampoline_fmt_64 =
   "\n"
   ".align 4\n"
   "\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "leaq -(128+32)(%%rsp), %%rsp\n"
+#else
   "leaq -(128+24)(%%rsp), %%rsp\n"
+#endif
   "movq %%rdx,  0(%%rsp)\n"
   "movq %%rcx,  8(%%rsp)\n"
   "movq %%rax, 16(%%rsp)\n"
   "movq $0x%08x, %%rcx\n"
-  "call __afl_maybe_log\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "movq %%rbx, 24(%%rsp)\n"
+  "movq $0x%08x, %%rbx\n"
+#endif
+  "call __afl_maybe_log%s\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "movq 24(%%rsp), %%rbx\n"
+#endif
   "movq 16(%%rsp), %%rax\n"
   "movq  8(%%rsp), %%rcx\n"
   "movq  0(%%rsp), %%rdx\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "leaq (128+32)(%%rsp), %%rsp\n"
+#else
   "leaq (128+24)(%%rsp), %%rsp\n"
+#endif
   "\n"
   "/* --- END --- */\n"
   "\n";
 
-static const u8* main_payload_32 = 
-
+static const u8* main_payload_32 =
   "\n"
   "/* --- AFL MAIN PAYLOAD (32-BIT) --- */\n"
   "\n"
@@ -158,6 +190,75 @@ static const u8* main_payload_32 =
   ".code32\n"
   ".align 8\n"
   "\n"
+
+#if FRONTIERS > FRONTIERS_NONE
+  "__afl_maybe_log_ftr:\n"
+  "\n"
+  "  lahf\n"
+  "  seto %al\n"
+  "\n"
+  "  /* Check if SHM region is already mapped. */\n"
+  "\n"
+  "  movl  __afl_area_ptr, %edx\n"
+  "  testl %edx, %edx\n"
+  "  je    __afl_setup\n"
+  "\n"
+  "__afl_store_ftr:\n"
+  "\n"
+  "  /* Calculate and store hit for the code location specified in ecx. There\n"
+  "     is a double-XOR way of doing this without tainting another register,\n"
+  "     and we use it on 64-bit systems; but it's slower for 32-bit ones. We\n"
+  "     also compute the frontier branch location that we did not reach. */\n"
+  "\n"
+#ifndef COVERAGE_ONLY
+  "  movl __afl_prev_loc, %edi\n"
+  "  xorl %edi, %ebx\n"
+  "  xorl %ecx, %edi\n"
+  "  shrl $1, %ecx\n"
+  "  movl %ecx, __afl_prev_loc\n"
+#else
+  "  movl %ecx, %edi\n"
+#endif /* ^!COVERAGE_ONLY */
+  "\n"
+#ifdef SKIP_COUNTS
+  "  orb  $1, (%edx, %edi, 1)\n"
+#else
+  "  incb (%edx, %edi, 1)\n"
+#endif /* ^SKIP_COUNTS */
+  "  /* Store the frontier (untouched) branch if needed. The frontier flag is \n"
+  "     two-bit flag. The first bit is set when this is we spotted this location\n"
+  "     as a frontier. The second bit and first bit is set when we find that we\n"
+  "     have approached this frontier. We mark the other branch (in %ebx) as pos-\n"
+  "     sibly frontier (2), and the current branch (in %ecx) as visited(3).*/\n"
+  "\n"
+#if FRONTIERS >= FRONTIERS_COUNT
+  "  incb " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%edx, %ebx)\n"
+#endif
+  "\n"
+  "  mov %ebx, %edi\n"
+  "  shl %ecx, 8\n"
+  "  mov %bl, %cl\n"
+  "  and $3, %cl\n"
+  "  mov $2, %bl\n"
+  "  shl %cl\n"
+  "  shl %cl, %bl\n"
+  "  shr $2, %edi\n"
+  "  orb %bl, " STRINGIFY((MAP_SIZE)) "(%edx, %edi)\n"
+  "  shr %ecx, 8\n"
+  "\n"
+  "  mov %ecx, %edi"
+  "  mov $3, %bl\n"
+  "  and $3, %cl\n"
+  "  shl %cl\n"
+  "  shl %cl, %bl\n"
+  "  shr $2, %edi\n"
+  "  orb %bl, " STRINGIFY((MAP_SIZE)) "(%edx, %edi)\n"
+  "\n"
+  "  addb $127, %al\n"
+  "  sahf\n"
+  "  ret\n"
+  "\n"
+#endif // FRONTIERS
 
   "__afl_maybe_log:\n"
   "\n"
@@ -331,6 +432,14 @@ static const u8* main_payload_32 =
   "  popl %edx\n"
   "  popl %ecx\n"
   "  popl %eax\n"
+  "\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "  /* Check if the *not taken* branch location is set. This is the case for\n"
+  "     conditional branches. We make two separate procs because a branch in the\n"
+  "     __afl_store/__afl_maybe_log will be pretty expensive. */"
+  "  test %ebx, %ebx\n"
+  "  jne  __afl_store_ftr\n"
+#endif
   "  jmp  __afl_store\n"
   "\n"
   "__afl_die:\n"
@@ -387,7 +496,75 @@ static const u8* main_payload_64 =
   ".att_syntax\n"
   ".code64\n"
   ".align 8\n"
+#if FRONTIERS > FRONTIERS_NONE
   "\n"
+  "__afl_maybe_log_ftr:\n"
+  "\n"
+#if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
+  "  .byte 0x9f /* lahf */\n"
+#else
+  "  lahf\n"
+#endif /* ^__OpenBSD__, etc */
+  "  seto  %al\n"
+  "  shl $16, %eax\n"
+  "\n"
+  "  /* Check if SHM region is already mapped. */\n"
+  "\n"
+  "  movq  __afl_area_ptr(%rip), %rdx\n"
+  "  testq %rdx, %rdx\n"
+  "  je    __afl_setup\n"
+  "\n"
+  "__afl_store_ftr:\n"
+  "\n"
+  "  /* Calculate and store hit for the code location specified in rcx. */\n"
+  "\n"
+#ifndef COVERAGE_ONLY
+  "  xorq __afl_prev_loc(%rip), %rcx\n"
+  "  xorq __afl_prev_loc(%rip), %rbx\n"
+  "  xorq %rcx, __afl_prev_loc(%rip)\n"
+  "  shrq $1, __afl_prev_loc(%rip)\n"
+#endif /* ^!COVERAGE_ONLY */
+  "\n"
+#ifdef SKIP_COUNTS
+  "  orb  $1, (%rdx, %rcx, 1)\n"
+#else
+  "  incb (%rdx, %rcx, 1)\n"
+#endif /* ^SKIP_COUNTS */
+  "\n"
+  "  /* Store the frontier branch flags. This one is reversed of the 32-bit"
+  "     counterpart, i.e. we start with marking current branch as visited, "
+  "     then the other branch as frontier. */\n"
+  "\n"
+#if FRONTIERS >= FRONTIERS_COUNT
+  "  incb " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%rdx, %rbx)\n"
+#endif
+  "  mov %cl, %al\n"
+  "  and $3, %cl\n"
+  "  shl %cl\n"
+  "  mov $3, %ah\n"
+  "  shl %cl, %ah\n"
+  "  mov %al, %cl\n"
+  "  shr $2, %ecx\n"
+  "  orb %ah, " STRINGIFY((MAP_SIZE)) "(%rdx, %rcx)\n"
+  "\n"
+  "  mov %bl, %cl\n"
+  "  and $3, %cl\n"
+  "  shl %cl\n"
+  "  mov $2, %ah\n"
+  "  shl %cl, %ah\n"
+  "  shr $2, %ebx\n"
+  "  orb %ah, " STRINGIFY((MAP_SIZE)) "(%rdx, %rbx)\n"
+  "\n"
+  "  shr $16, %rax\n"
+  "  addb $127, %al\n"
+#if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
+  "  .byte 0x9e /* sahf */\n"
+#else
+  "  sahf\n"
+#endif /* ^__OpenBSD__, etc */
+  "  ret\n"
+  "\n"
+#endif // FRONTIERS
   "__afl_maybe_log:\n"
   "\n"
 #if defined(__OpenBSD__)  || (defined(__FreeBSD__) && (__FreeBSD__ < 9))
@@ -636,6 +813,13 @@ static const u8* main_payload_64 =
   "\n"
   "  leaq 352(%rsp), %rsp\n"
   "\n"
+#if FRONTIERS > FRONTIERS_NONE
+  "  /* Check if the *not taken* branch location is set. This is the case for\n"
+  "     conditional branches. We make two separate procs because a branch in the\n"
+  "     __afl_store/__afl_maybe_log will be pretty expensive. */"
+  "  test %rbx, %rbx\n"
+  "  jne  __afl_store_ftr\n"
+#endif
   "  jmp  __afl_store\n"
   "\n"
   "__afl_die:\n"

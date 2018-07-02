@@ -36,6 +36,7 @@
 #include "alloc-inl.h"
 
 #include "afl-as.h"
+#include "hashmap.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -48,21 +49,45 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 
+//TODO: jump tables.
+//TODO: reroute jmp's to conditional labels so that they don't get instrumented!
+
+#define max(a,b) ({        \
+  __typeof__ (a) _a = (a); \
+  __typeof__ (b) _b = (b); \
+  _a > _b ? _a : _b; })
+
+enum label_type {
+  LTYPE_NULL, LTYPE_UNKNOWN, LTYPE_JMP, LTYPE_COND, LTYPE_FUNCT
+};
+
+typedef struct __inst_data {
+  u32 loc;
+  u8* lblName;
+} ins_data;
+
+typedef struct __label_data {
+  u32 loc_label;
+  u32 loc_fallthrough;
+  u8  type;
+} label_data;
+
 static u8** as_params;          /* Parameters passed to the real 'as'   */
 
 static u8*  input_file;         /* Originally specified input file      */
+static u8   is_tmp;             /* Input file is a temporary file       */
 static u8*  modified_file;      /* Instrumented file for the real 'as'  */
 
 static u8   be_quiet,           /* Quiet mode (no stderr output)        */
-            clang_mode,         /* Running in clang mode?               */
-            pass_thru,          /* Just pass data through?              */
-            just_version,       /* Just show version?                   */
-            sanitizer;          /* Using ASAN / MSAN                    */
+    clang_mode,         /* Running in clang mode?               */
+    pass_thru,          /* Just pass data through?              */
+    just_version,       /* Just show version?                   */
+    sanitizer;          /* Using ASAN / MSAN                    */
 
 static u32  inst_ratio = 100,   /* Instrumentation probability (%)      */
-            as_par_cnt = 1;     /* Number of params to 'as'             */
+    as_par_cnt = 1;     /* Number of params to 'as'             */
 
-/* If we don't find --32 or --64 in the command line, default to 
+/* If we don't find --32 or --64 in the command line, default to
    instrumentation for whichever mode we were compiled with. This is not
    perfect, but should do the trick for almost all use cases. */
 
@@ -187,7 +212,14 @@ static void edit_params(int argc, char** argv) {
     }
 
     if (input_file[1]) FATAL("Incorrect use (not called through afl-gcc?)");
-      else input_file = NULL;
+    else {
+      /* Because we need a file for making a double pass, we have to write
+       input to a temporary file */
+      input_file = alloc_printf("%s/.tmp-%u-%u.s", tmp_dir, getpid(),
+                                (u32)time(NULL));
+      is_tmp = 1;
+    }
+
 
   } else {
 
@@ -205,13 +237,93 @@ static void edit_params(int argc, char** argv) {
   modified_file = alloc_printf("%s/.afl-%u-%u.s", tmp_dir, getpid(),
                                (u32)time(NULL));
 
-wrap_things_up:
+  wrap_things_up:
 
   as_params[as_par_cnt++] = modified_file;
   as_params[as_par_cnt]   = NULL;
 
 }
 
+static u32 update_label(map_t syms, int is_jmp, const u8* lbl, enum label_type type) {
+  label_data* ldata;
+  if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+    ldata = ck_alloc(sizeof(label_data));
+    hashmap_put(syms, lbl, ldata);
+  }
+
+  ldata->type = max(ldata->type, (u8)type);
+
+  u32 ret = (u32)R(MAP_SIZE);
+  if (is_jmp) {
+    ldata->loc_fallthrough = ret;
+  } else {
+    ldata->loc_label = ret;
+  }
+  return ret;
+}
+
+static void get_label(map_t syms, int is_jmp, const u8* lbl, u32* label_type, u32* frontier) {
+  label_data* ldata;
+  if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+    *label_type = LTYPE_NULL;
+    return;
+  }
+
+  *label_type = ldata->type;
+  *frontier = (is_jmp ? ldata->loc_label : ldata->loc_fallthrough);
+}
+
+static int clean_sym(any_t key, any_t val) {
+  label_data* ldata = val;
+  ck_free(ldata);
+  return MAP_OK;
+}
+
+static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_jmp) {
+  int res = 0;
+  u32 ftr_loc;
+  u32 ins_type;
+
+  get_label(syms, is_jmp, ins->lblName, &ins_type, &ftr_loc);
+
+  switch (ins_type) {
+    case LTYPE_NULL:
+    case LTYPE_JMP:
+      goto clean;
+
+    case LTYPE_UNKNOWN:
+    case LTYPE_FUNCT:
+      ftr_loc = 0;
+      break;
+
+    case LTYPE_COND:
+      // Already set.
+      break;
+
+    default:
+      FATAL("Invalid LTYPE caught!");
+
+  }
+
+  SAYF("Adding instrumentation for `%s'%s\n", ins->lblName, ftr_loc == 0 ? "" :
+                                                            (is_jmp ? " (conditional, fall)" : " (conditional, jmp)"));
+#if FRONTIERS > FRONTIERS_NONE
+  fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
+          ins->loc, ftr_loc, ftr_loc == 0 ? TRAMP_NORM : TRAMP_FTR);
+#else
+  fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
+            R(MAP_SIZE), TRAMP_NORM);
+#endif
+
+  res = 1;
+
+clean:
+
+  ck_free(ins->lblName);
+  ck_free(ins);
+
+  return res;
+}
 
 /* Process input file, generate modified_file. Insert instrumentation in all
    the appropriate places. */
@@ -220,26 +332,53 @@ static void add_instrumentation(void) {
 
   static u8 line[MAX_LINE];
 
+  static u8 cur_label[MAX_LINE];
+
+  map_t syms = hashmap_new();
+
+  u32 tmp_loc;
+
   FILE* inf;
   FILE* outf;
   s32 outfd;
   u32 ins_lines = 0;
 
+  u32 line_num = 0; // 1-based index!
+  u32 total_lines = 0;
+
   u8  instr_ok = 0, skip_csect = 0, skip_next_label = 0,
       skip_intel = 0, skip_app = 0, instrument_next = 0;
 
-#ifdef __APPLE__
-
   u8* colon_pos;
 
-#endif /* __APPLE__ */
+  ins_data** ins_lbl;
+  ins_data** ins_jmp;
 
-  if (input_file) {
+  if (is_tmp) {
+
+    inf = fopen(input_file, "w+");
+    if (!inf) PFATAL("Unable to open temp file '%s'", input_file);
+
+    while (fgets(line, MAX_LINE, stdin)) {
+
+      total_lines++;
+      if (fprintf(inf, "%s", line) < 0)
+        PFATAL("Unable to write to file '%s'", input_file);
+
+    }
+
+  } else {
 
     inf = fopen(input_file, "r");
     if (!inf) PFATAL("Unable to read '%s'", input_file);
 
-  } else inf = stdin;
+    while (fgets(line, MAX_LINE, inf)) {
+      total_lines++;
+    }
+
+    rewind(inf);
+
+  }
 
   outfd = open(modified_file, O_WRONLY | O_EXCL | O_CREAT, 0600);
 
@@ -247,9 +386,14 @@ static void add_instrumentation(void) {
 
   outf = fdopen(outfd, "w");
 
-  if (!outf) PFATAL("fdopen() failed");  
+  if (!outf) PFATAL("fdopen() failed");
+
+  ins_lbl = ck_alloc(sizeof(ins_data*) * total_lines);
+  ins_jmp = ck_alloc(sizeof(ins_data*) * total_lines);
 
   while (fgets(line, MAX_LINE, inf)) {
+
+    line_num++;
 
     /* In some cases, we want to defer writing the instrumentation trampoline
        until after all the labels, macros, comments, etc. If we're in this
@@ -259,17 +403,25 @@ static void add_instrumentation(void) {
     if (!pass_thru && !skip_intel && !skip_app && !skip_csect && instr_ok &&
         instrument_next && line[0] == '\t' && isalpha(line[1])) {
 
-      fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-              R(MAP_SIZE));
+      /* Update the map of symbols with this label. We add this label if it
+         has not been previously found. */
+
+      tmp_loc = update_label(syms, 0 /* not jmp */, cur_label,
+                             cur_label[0] == '.' ? LTYPE_UNKNOWN : LTYPE_FUNCT);
+
+      /* Record this line as instrumented. */
+
+      SAYF("Marking `%s' for instrumentation\n", cur_label);
+
+      ins_data* cur_ins = ins_lbl[line_num - 1] = ck_alloc(sizeof(ins_data));
+      cur_ins->lblName = ck_strdup(cur_label);
+      cur_ins->loc = tmp_loc;
 
       instrument_next = 0;
-      ins_lines++;
 
     }
 
-    /* Output the actual line, call it a day in pass-thru mode. */
-
-    fputs(line, outf);
+    /* Call it a day in pass-thru mode. */
 
     if (pass_thru) continue;
 
@@ -281,17 +433,17 @@ static void add_instrumentation(void) {
 
       /* OpenBSD puts jump tables directly inline with the code, which is
          a bit annoying. They use a specific format of p2align directives
-         around them, so we use that as a signal. */
+         around them, so we use that as a signal. FIXME: THIS IS BROKEN! */
 
-      if (!clang_mode && instr_ok && !strncmp(line + 2, "p2align ", 8) &&
-          isdigit(line[10]) && line[11] == '\n') skip_next_label = 1;
+      //if (!clang_mode && instr_ok && !strncmp(line + 2, "p2align ", 8) &&
+      //    isdigit(line[10]) && line[11] == '\n') skip_next_label = 1;
 
       if (!strncmp(line + 2, "text\n", 5) ||
           !strncmp(line + 2, "section\t.text", 13) ||
           !strncmp(line + 2, "section\t__TEXT,__text", 21) ||
           !strncmp(line + 2, "section __TEXT,__text", 21)) {
         instr_ok = 1;
-        continue; 
+        continue;
       }
 
       if (!strncmp(line + 2, "section\t", 8) ||
@@ -345,6 +497,7 @@ static void add_instrumentation(void) {
          ^ # BB#0:   - ditto
          ^.Ltmp0:    - clang non-branch labels
          ^.LC0       - GCC non-branch labels
+         ^.LVL
          ^.LBB0_0:   - ditto (when in GCC mode)
          ^\tjmp foo  - non-conditional jumps
 
@@ -363,12 +516,70 @@ static void add_instrumentation(void) {
 
     if (line[0] == '\t') {
 
-      if (line[1] == 'j' && line[2] != 'm' && R(100) < inst_ratio) {
+      /* Represents a jump of some sort */
+      if (line[1] == 'j') {
 
-        fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-                R(MAP_SIZE));
+        u32 ind = 1;
+        u32 ind2 = 0;
 
-        ins_lines++;
+        /* Skip over the j** instruction */
+
+        while (isalpha(line[ind]))
+
+          ind++;
+
+        /* Skip over the space immediately after the j** instruction */
+
+        while (isspace(line[ind]))
+
+          ind++;
+
+
+
+        /* At this point we should get to the jump instruction operand. We
+           check if it is a register, or a memory access, or some number
+           (very rare). We skip over these jump instructions. */
+        if (line[ind] == '%' || line[ind] == '(' || line[ind] == '-' ||
+            line[ind] == '*' || isdigit(line[ind])) {
+
+          continue;
+
+        }
+
+        /* Copy over label name one byte at a time. TODO: maybe theres a '(' later on? */
+
+        while (!isspace(line[ind]))
+
+          cur_label[ind2++] = line[ind++];
+
+        cur_label[ind2] = 0;
+
+        if (line[2] == 'm') {
+
+          /* Unconditional jump. We want to mark these so that we can ignore
+             labels that are targets of these unconditional jump. If on the
+             other hand we have previously seen this label used with some
+             higher priority type, i.e. J<cond> or in a function, this
+             judgement gets overriden. */
+
+          SAYF("No instrumentation for `%s'\n", cur_label);
+
+          update_label(syms, 1, cur_label, LTYPE_JMP);
+
+        } else if (R(100) < inst_ratio){
+
+          /* We indicate that we seen this label being used in a J<cond>
+             usage, so that we are sure to instrument this. */
+          tmp_loc = update_label(syms, 1, cur_label, LTYPE_COND);
+
+          SAYF("Marking `%s' for instrumentation (conditional)\n", cur_label);
+
+          /* Record this line as instrumented. */
+          ins_data* cur_ins = ins_jmp[line_num - 1] = ck_alloc(sizeof(ins_data));
+          cur_ins->lblName = ck_strdup(cur_label);
+          cur_ins->loc = tmp_loc;
+
+        }
 
       }
 
@@ -380,19 +591,20 @@ static void add_instrumentation(void) {
        tread carefully and account for several different formatting
        conventions. */
 
-#ifdef __APPLE__
-
-    /* Apple: L<whatever><digit>: */
-
     if ((colon_pos = strstr(line, ":"))) {
 
+#ifdef __APPLE__
+
+      /* Apple: L<whatever><digit>: */
+
       if (line[0] == 'L' && isdigit(*(colon_pos - 1))) {
+#ifndef __APPLE__
+      } // keeps clion's curly brace detection happy
+#endif
 
 #else
 
-    /* Everybody else: .L<whatever>: */
-
-    if (strstr(line, ":")) {
+      /* Everybody else: .L<whatever>: */
 
       if (line[0] == '.') {
 
@@ -404,30 +616,38 @@ static void add_instrumentation(void) {
 
         /* Apple: L<num> / LBB<num> */
 
-        if ((isdigit(line[1]) || (clang_mode && !strncmp(line, "LBB", 3)))
+        if (((!clang_mode && isdigit(line[1])) || (clang_mode && !strncmp(line, "LBB", 3)))
             && R(100) < inst_ratio) {
-
+#ifndef __APPLE__
+        } // keeps clion's curly brace detection happy
+#endif
 #else
 
-        /* Apple: .L<num> / .LBB<num> */
+        /* Everybody else: .L<num> / .LBB<num> */
 
-        if ((isdigit(line[2]) || (clang_mode && !strncmp(line + 1, "LBB", 3)))
+        if (((!clang_mode && isdigit(line[2])) || (clang_mode && !strncmp(line + 1, "LBB", 3)))
             && R(100) < inst_ratio) {
 
 #endif /* __APPLE__ */
 
           /* An optimization is possible here by adding the code only if the
              label is mentioned in the code in contexts other than call / jmp.
-             That said, this complicates the code by requiring two-pass
-             processing (messy with stdin), and results in a speed gain
-             typically under 10%, because compilers are generally pretty good
-             about not generating spurious intra-function jumps.
+
+             This requires a double-pass, but since we also need to track the
+             "frontier", i.e. the branch not taken, we might as well apply this
+             optimization.
 
              We use deferred output chiefly to avoid disrupting
              .Lfunc_begin0-style exception handling calculations (a problem on
              MacOS X). */
 
           if (!skip_next_label) instrument_next = 1; else skip_next_label = 0;
+
+          SAYF("Found label `%s' (local)\n", cur_label);
+
+        } else {
+
+          continue;
 
         }
 
@@ -436,15 +656,58 @@ static void add_instrumentation(void) {
         /* Function label (always instrumented, deferred mode). */
 
         instrument_next = 1;
-    
+
+        SAYF("Found label `%s' (function)\n", cur_label);
+
       }
+
+      /* Get the label */
+
+      strncpy(cur_label, line, (u32)(colon_pos - line));
+
+      cur_label[colon_pos - line] = 0;
 
     }
 
   }
 
+  rewind(inf);
+
+  line_num = 0;
+
+  while (++line_num <= total_lines) {
+
+    ins_data* ins;
+
+    if (ins = ins_lbl[line_num - 1])
+
+      ins_lines += write_instrumentation(outf, syms, ins, 0);
+
+    if (!fgets(line, MAX_LINE, inf)) {
+
+      PFATAL("Unable to read from file!");
+
+    }
+
+    fputs(line, outf);
+
+    if (ins = ins_jmp[line_num - 1])
+
+      ins_lines += write_instrumentation(outf, syms, ins, 1);
+
+  }
+
+  /* Free some data structures */
+
+  hashmap_iterate(syms, clean_sym, NULL);
+  hashmap_free(syms);
+  ck_free(ins_lbl);
+  ck_free(ins_jmp);
+
   if (ins_lines)
     fputs(use_64bit ? main_payload_64 : main_payload_32, outf);
+
+  fgets(line, 100, stdin);
 
   if (input_file) fclose(inf);
   fclose(outf);
@@ -455,10 +718,10 @@ static void add_instrumentation(void) {
                           pass_thru ? " (pass-thru mode)" : "");
     else OKF("Instrumented %u locations (%s-bit, %s mode, ratio %u%%).",
              ins_lines, use_64bit ? "64" : "32",
-             getenv("AFL_HARDEN") ? "hardened" : 
+             getenv("AFL_HARDEN") ? "hardened" :
              (sanitizer ? "ASAN/MSAN" : "non-hardened"),
              inst_ratio);
- 
+
   }
 
 }
@@ -481,7 +744,7 @@ int main(int argc, char** argv) {
   if (isatty(2) && !getenv("AFL_QUIET")) {
 
     SAYF(cCYA "afl-as " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
- 
+
   } else be_quiet = 1;
 
   if (argc < 2) {
@@ -509,7 +772,7 @@ int main(int argc, char** argv) {
 
   if (inst_ratio_str) {
 
-    if (sscanf(inst_ratio_str, "%u", &inst_ratio) != 1 || inst_ratio > 100) 
+    if (sscanf(inst_ratio_str, "%u", &inst_ratio) != 1 || inst_ratio > 100)
       FATAL("Bad value of AFL_INST_RATIO (must be between 0 and 100)");
 
   }

@@ -255,7 +255,7 @@ static inline void* DFL_ck_realloc_block(void* orig, u32 size) {
 
 /* Create a buffer with a copy of a string. Returns NULL for NULL inputs. */
 
-static inline u8* DFL_ck_strdup(u8* str) {
+static inline u8* DFL_ck_strdup(const u8* str) {
 
   void* ret;
   u32   size;
@@ -282,7 +282,7 @@ static inline u8* DFL_ck_strdup(u8* str) {
 /* Create a buffer with a copy of a memory block. Returns NULL for zero-sized
    or NULL inputs. */
 
-static inline void* DFL_ck_memdup(void* mem, u32 size) {
+static inline void* DFL_ck_memdup(const void* mem, u32 size) {
 
   void* ret;
 
@@ -306,7 +306,7 @@ static inline void* DFL_ck_memdup(void* mem, u32 size) {
 /* Create a buffer with a block of text, appending a NUL terminator at the end.
    Returns NULL for zero-sized or NULL inputs. */
 
-static inline u8* DFL_ck_memdup_str(u8* mem, u32 size) {
+static inline u8* DFL_ck_memdup_str(const u8* mem, u32 size) {
 
   u8* ret;
 

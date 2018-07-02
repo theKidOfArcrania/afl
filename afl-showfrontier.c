@@ -1,10 +1,8 @@
 /*
-   american fuzzy lop - map display utility
+   american fuzzy lop - frontier visualizer
    ----------------------------------------
 
-   Written and maintained by Michal Zalewski <lcamtuf@google.com>
-
-   Copyright 2013, 2014, 2015, 2016, 2017 Google Inc. All rights reserved.
+   Written by theKidOfArcrania and Michal Zalewski <lcamtuf@google.com>.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -12,9 +10,9 @@
 
      http://www.apache.org/licenses/LICENSE-2.0
 
-   A very simple tool that runs the targeted binary and displays
-   the contents of the trace bitmap in a human-readable form. Useful in
-   scripts to eliminate redundant inputs and perform other checks.
+   A simple tool that runs the targeted binary and displays the set of
+   frontier conditional branches (and its count) detected by AFL in a
+   human-readable form. Used to test whether if the frontier code works
 
    Exit code is 2 if the target program crashes; 1 if it times out or
    there is a problem executing it; or 0 if execution is successful.
@@ -46,9 +44,16 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 
+typedef struct __frontier_info {
+  u8 reach; // 0 if not reachable, 2 if frontier, 3 if reached
+  u8 frontier_factor; // number of times we have reached this as frontier state
+} frontier_info;
+
 static s32 child_pid;                 /* PID of the tested program         */
 
 static u8* trace_bits;                /* SHM with instrumentation bitmap   */
+
+static frontier_info ftr_info[MAP_SIZE]; /* Frontier information. */
 
 static u8 *out_file,                  /* Trace output file                 */
           *doc_path,                  /* Path to docs                      */
@@ -63,7 +68,6 @@ static s32 shm_id;                    /* ID of the SHM region              */
 
 static u8  quiet_mode,                /* Hide non-essential messages?      */
            edges_only,                /* Ignore hit counts?                */
-           cmin_mode,                 /* Generate output in afl-cmin mode? */
            binary_mode,               /* Write output as a binary map      */
            keep_cores;                /* Allow coredumps?                  */
 
@@ -71,60 +75,6 @@ static volatile u8
            stop_soon,                 /* Ctrl-C pressed?                   */
            child_timed_out,           /* Child timed out?                  */
            child_crashed;             /* Child crashed?                    */
-
-/* Classify tuple counts. Instead of mapping to individual bits, as in
-   afl-fuzz.c, we map to more user-friendly numbers between 1 and 8. */
-
-static const u8 count_class_human[256] = {
-
-  [0]           = 0,
-  [1]           = 1,
-  [2]           = 2,
-  [3]           = 3,
-  [4 ... 7]     = 4,
-  [8 ... 15]    = 5,
-  [16 ... 31]   = 6,
-  [32 ... 127]  = 7,
-  [128 ... 255] = 8
-
-};
-
-static const u8 count_class_binary[256] = {
-
-  [0]           = 0,
-  [1]           = 1,
-  [2]           = 2,
-  [3]           = 4,
-  [4 ... 7]     = 8,
-  [8 ... 15]    = 16,
-  [16 ... 31]   = 32,
-  [32 ... 127]  = 64,
-  [128 ... 255] = 128
-
-};
-
-static void classify_counts(u8* mem, const u8* map) {
-
-  u32 i = MAP_SIZE;
-
-  if (edges_only) {
-
-    while (i--) {
-      if (*mem) *mem = 1;
-      mem++;
-    }
-
-  } else {
-
-    while (i--) {
-      *mem = map[*mem];
-      mem++;
-    }
-
-  }
-
-}
-
 
 /* Get rid of shared memory (atexit handler). */
 
@@ -134,6 +84,21 @@ static void remove_shm(void) {
 
 }
 
+/* Classifies the frontier information based on the map data. */
+
+static void classify_frontiers(frontier_info* ftr_out, u8* trace_map) {
+
+  u8 reach;
+
+  for (u32 i = 0; i < MAP_SIZE; i++){
+
+    ftr_out[i].reach = reach = trace_map[MAP_SIZE + (i >> 2)] >> ((i & 3) * 2);
+
+    //if (reach == 2)
+
+      ftr_out[i].frontier_factor = trace_map[MAP_SIZE + MAP_FTR_SIZE + i];
+  }
+}
 
 /* Configure shared memory. */
 
@@ -161,13 +126,13 @@ static void setup_shm(void) {
 
 /* Write results. */
 
-static u32 write_results(void) {
+static void write_results(u32* ftrs, u32* visited) {
 
   s32 fd;
-  u32 i, ret = 0;
+  u32 i;
 
-  u8  cco = !!getenv("AFL_CMIN_CRASHES_ONLY"),
-      caa = !!getenv("AFL_CMIN_ALLOW_ANY");
+  *ftrs = 0;
+  *visited = 0;
 
   if (!strncmp(out_file, "/dev/", 5)) {
 
@@ -190,11 +155,12 @@ static u32 write_results(void) {
 
   if (binary_mode) {
 
-    for (i = 0; i < MAP_SIZE; i++)
-      if (trace_bits[i]) ret++;
-    
-    ck_write(fd, trace_bits, MAP_SIZE, out_file);
-    close(fd);
+    //TODO:
+//    for (i = 0; i < MAP_SIZE; i++)
+//      if (trace_bits[i]) ret++;
+//
+//    ck_write(fd, trace_bits, MAP_SIZE, out_file);
+//    close(fd);
 
   } else {
 
@@ -204,25 +170,23 @@ static u32 write_results(void) {
 
     for (i = 0; i < MAP_SIZE; i++) {
 
-      if (!trace_bits[i]) continue;
-      ret++;
-
-      if (cmin_mode) {
-
-        if (child_timed_out) break;
-        if (!caa && child_crashed != cco) break;
-
-        fprintf(f, "%u%u\n", trace_bits[i], i);
-
-      } else fprintf(f, "%06u:%u\n", i, trace_bits[i]);
+      switch (ftr_info[i].reach) {
+        case 0:
+          break;
+        case 2:
+          fprintf(f, "%06u:frontier:%u\n", i, ftr_info[i].frontier_factor);
+          (*ftrs)++;
+          break;
+        case 3:
+          fprintf(f, "%06u:visited\n", i);
+          (*visited)++;
+      }
 
     }
   
     fclose(f);
 
   }
-
-  return ret;
 
 }
 
@@ -328,11 +292,10 @@ static void run_target(char** argv) {
   if (*(u32*)trace_bits == EXEC_FAIL_SIG)
     FATAL("Unable to execute '%s'", argv[0]);
 
-  classify_counts(trace_bits, binary_mode ?
-                  count_class_binary : count_class_human);
-
   if (!quiet_mode)
     SAYF(cRST "-- Program output ends --\n");
+
+  classify_frontiers(ftr_info, trace_bits);
 
   if (!child_timed_out && !stop_soon && WIFSIGNALED(status))
     child_crashed = 1;
@@ -461,7 +424,7 @@ static void detect_file_args(char** argv) {
 
 static void show_banner(void) {
 
-  SAYF(cCYA "afl-showmap " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
+  SAYF(cCYA "afl-showfrontier " cBRI VERSION cRST " by theKidOfArcrania and <lcamtuf@google.com>\n");
 
 }
 
@@ -621,7 +584,7 @@ int main(int argc, char** argv) {
 
   s32 opt;
   u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
-  u32 tcnt;
+  u32 tvis = 0, tftr = 0;
   char** use_argv;
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
@@ -700,15 +663,6 @@ int main(int argc, char** argv) {
         quiet_mode = 1;
         break;
 
-      case 'Z':
-
-        /* This is an undocumented option to write data in the syntax expected
-           by afl-cmin. Nobody else should have any use for this. */
-
-        cmin_mode  = 1;
-        quiet_mode = 1;
-        break;
-
       case 'A':
 
         /* Another afl-cmin specific feature. */
@@ -766,12 +720,13 @@ int main(int argc, char** argv) {
 
   run_target(use_argv);
 
-  tcnt = write_results();
+  write_results(&tftr, &tvis);
 
   if (!quiet_mode) {
 
-    if (!tcnt) FATAL("No instrumentation detected" cRST);
-    OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+    if (!tvis && !tftr) FATAL("No instrumentation detected" cRST);
+    OKF("Visited %u tuples, and found %u frontiers in '%s'." cRST,
+        tvis, tftr, out_file);
 
   }
 

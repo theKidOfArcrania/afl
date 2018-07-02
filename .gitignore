@@ -8,4 +8,12 @@ afl-gcc
 afl-gotcpu
 afl-showmap
 afl-tmin
+afl-showfrontier
 as
+**/*.o
+**/*.so
+afl-clang-fast
+afl-clang-fast++
+CMakeLists.txt
+.idea
+cmake-build-debug/

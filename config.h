@@ -315,6 +315,7 @@
 
 #define MAP_SIZE_POW2       16
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
+#define MAP_FTR_SIZE       (MAP_SIZE >> 2)
 
 /* Maximum allocator request size (keep well under INT_MAX): */
 
@@ -346,5 +347,23 @@
    measuring coverage that could be attained by a "dumb" fuzzing algorithm: */
 
 // #define IGNORE_FINDS
+
+
+#define FRONTIERS_NONE  0
+#define FRONTIERS_FLAG  1
+#define FRONTIERS_COUNT 2
+
+/* Determines the level of frontier awareness. Frontiers allow AFL fuzzer to
+   try to actively fuzz those input seeds that have more frontier locations,
+   i.e. has more conditional branches that have never been taken. There are
+   currently three different levels of frontiers:
+
+     - FRONTIER_NONE: disable frontier awareness
+     - FRONTIER_FLAG: only flag those branches that are possibly frontiers.
+     - FRONTIER_COUNT: also count the number of times this branch is a frontier.
+
+   */
+#define FRONTIERS 2
+
 
 #endif /* ! _HAVE_CONFIG_H */
