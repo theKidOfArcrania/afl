@@ -50,7 +50,6 @@
 #include <sys/time.h>
 
 //TODO: jump tables.
-//TODO: reroute jmp's to conditional labels so that they don't get instrumented!
 
 #define max(a,b) ({        \
   __typeof__ (a) _a = (a); \
@@ -70,6 +69,7 @@ typedef struct __label_data {
   u32 loc_label;
   u32 loc_fallthrough;
   u8  type;
+  u8  used;
 } label_data;
 
 static u8** as_params;          /* Parameters passed to the real 'as'   */
@@ -255,7 +255,8 @@ static u32 update_label(map_t syms, int is_jmp, const u8* lbl, enum label_type t
 
   u32 ret = (u32)R(MAP_SIZE);
   if (is_jmp) {
-    ldata->loc_fallthrough = ret;
+    if (!ldata->loc_fallthrough)
+      ldata->loc_fallthrough = ret;
   } else {
     ldata->loc_label = ret;
   }
@@ -273,6 +274,21 @@ static void get_label(map_t syms, int is_jmp, const u8* lbl, u32* label_type, u3
   *frontier = (is_jmp ? ldata->loc_label : ldata->loc_fallthrough);
 }
 
+static int check_label_used(map_t syms, const u8* lbl) {
+  label_data* ldata;
+  if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+
+    FATAL("assert error.");
+
+  }
+
+  int used = ldata->used;
+
+  ldata->used = 1;
+
+  return used;
+}
+
 static int clean_sym(any_t key, any_t val) {
   label_data* ldata = val;
   ck_free(ldata);
@@ -280,9 +296,11 @@ static int clean_sym(any_t key, any_t val) {
 }
 
 static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_jmp) {
+  static ctr = 0;
+
   int res = 0;
-  u32 ftr_loc;
-  u32 ins_type;
+  u32 ftr_loc, ins_type;
+  u8 *lbl_genname;
 
   get_label(syms, is_jmp, ins->lblName, &ins_type, &ftr_loc);
 
@@ -306,14 +324,41 @@ static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_j
   }
 
   SAYF("Adding instrumentation for `%s'%s\n", ins->lblName, ftr_loc == 0 ? "" :
-                                                            (is_jmp ? " (conditional, fall)" : " (conditional, jmp)"));
+        (is_jmp ? " (conditional, fall)" : " (conditional, jmp)"));
+
+  if (is_jmp && !check_label_used(syms, ins->lblName)) {
+
+    lbl_genname = alloc_printf(LBL_GEN "_%d", ins->loc, ctr++);
+
+  } else {
+
+    lbl_genname = alloc_printf(LBL_GEN, ins->loc);
+
+  }
+
+
+
+
+  if (!is_jmp && ftr_loc != 0) {
+
+    /* Prevent normal fall-through in labels, see add_instrumentation for
+       more info. */
+
+    fprintf(outf, "\tjmp %s_skip_inst", lbl_genname);
+
+  }
+
+
+
 #if FRONTIERS > FRONTIERS_NONE
   fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-          ins->loc, ftr_loc, ftr_loc == 0 ? TRAMP_NORM : TRAMP_FTR);
+          ins->loc, ftr_loc == 0 ? LOG_NORM : LOG_FTR, lbl_genname, ftr_loc);
 #else
   fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-            R(MAP_SIZE), TRAMP_NORM);
+            R(MAP_SIZE), ins->lblName, LOG_NORM);
 #endif
+
+  ck_free(lbl_genname);
 
   res = 1;
 
@@ -349,10 +394,13 @@ static void add_instrumentation(void) {
   u8  instr_ok = 0, skip_csect = 0, skip_next_label = 0,
       skip_intel = 0, skip_app = 0, instrument_next = 0;
 
-  u8* colon_pos;
+  u8 *colon_pos, *inst_name;
+
+  u32 lbl_type, lbl_loc;
 
   ins_data** ins_lbl;
   ins_data** ins_jmp;
+  ins_data** ins_jcond;
 
   if (is_tmp) {
 
@@ -390,6 +438,7 @@ static void add_instrumentation(void) {
 
   ins_lbl = ck_alloc(sizeof(ins_data*) * total_lines);
   ins_jmp = ck_alloc(sizeof(ins_data*) * total_lines);
+  ins_jcond = ck_alloc(sizeof(ins_data*) * total_lines);
 
   while (fgets(line, MAX_LINE, inf)) {
 
@@ -560,11 +609,17 @@ static void add_instrumentation(void) {
              labels that are targets of these unconditional jump. If on the
              other hand we have previously seen this label used with some
              higher priority type, i.e. J<cond> or in a function, this
-             judgement gets overriden. */
+             judgement gets overriden. In the latter case, if we find that this
+             jumps to a J<cond> label, we might want it to jump over
+             instrumentation instead. Let's record it just in case. */
 
           SAYF("No instrumentation for `%s'\n", cur_label);
 
           update_label(syms, 1, cur_label, LTYPE_JMP);
+
+          ins_data* cur_ins = ins_jmp[line_num - 1] = ck_alloc(sizeof(ins_data));
+          cur_ins->lblName = ck_strdup(cur_label);
+          cur_ins->loc = 0;
 
         } else if (R(100) < inst_ratio){
 
@@ -575,7 +630,7 @@ static void add_instrumentation(void) {
           SAYF("Marking `%s' for instrumentation (conditional)\n", cur_label);
 
           /* Record this line as instrumented. */
-          ins_data* cur_ins = ins_jmp[line_num - 1] = ck_alloc(sizeof(ins_data));
+          ins_data* cur_ins = ins_jcond[line_num - 1] = ck_alloc(sizeof(ins_data));
           cur_ins->lblName = ck_strdup(cur_label);
           cur_ins->loc = tmp_loc;
 
@@ -689,11 +744,46 @@ static void add_instrumentation(void) {
 
     }
 
-    fputs(line, outf);
+    /* We want to modify the target of the jmp instruction to bypass the
+       instrumentation. This way, we avoid needlessly polluting the
+       frontier. We also want to avoid "fall-through" through an
+       instrumented label. The first part is to add a jmp through when
+       ordinary "fall-through" of the label (in write_instrumentation),
+       the second part is to modify the target of the jump label. */
 
-    if (ins = ins_jmp[line_num - 1])
+    if (ins = ins_jmp[line_num - 1]) {
+
+      /* Modify jmp label */
+
+      get_label(syms, 1, ins->lblName, &lbl_type, &lbl_loc);
+
+      if (lbl_type == LTYPE_COND) {
+
+        fprintf(outf, "\tjmp "LBL_GEN"_skip_inst\n", lbl_loc);
+
+        continue;
+
+      }
+
+    } else if (line_num < total_lines && (ins = ins_jcond[line_num - 1])) {
+
+      /* Modify jcond label */
+
+      get_label(syms, 1, ins->lblName, &lbl_type, &lbl_loc);
+
+      inst_name = strtok(line + 1, "\t \n\r");
+
+      fprintf(outf, "\t%s\t"LBL_GEN"_inst\n", inst_name, lbl_loc);
+
+      /* Add profiling to jcond fall through*/
 
       ins_lines += write_instrumentation(outf, syms, ins, 1);
+
+      continue;
+
+    }
+
+    fputs(line, outf);
 
   }
 
@@ -703,11 +793,10 @@ static void add_instrumentation(void) {
   hashmap_free(syms);
   ck_free(ins_lbl);
   ck_free(ins_jmp);
+  ck_free(ins_jcond);
 
   if (ins_lines)
     fputs(use_64bit ? main_payload_64 : main_payload_32, outf);
-
-  fgets(line, 100, stdin);
 
   if (input_file) fclose(inf);
   fclose(outf);

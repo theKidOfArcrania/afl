@@ -140,6 +140,9 @@ EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
            virgin_crash[MAP_SIZE];    /* Bits we haven't seen in crashes  */
 
+EXP_ST u8  ftr_flag[MAP_SIZE],        /* Bit flag for frontiers           */
+           ftr_max_hits[MAP_SIZE];    /* Approx max hit coverages in bits */
+
 static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
 static s32 shm_id;                    /* ID of the SHM region             */
@@ -238,7 +241,10 @@ struct queue_entry {
       fs_redundant;                   /* Marked as redundant in the fs?   */
 
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
-      exec_cksum;                     /* Checksum of the execution trace  */
+      exec_cksum,                     /* Checksum of the execution trace  */
+      frontiers,                      /* Number of frontier locations     */
+      visited;                        /* Number of visited locations      */
+
 
   u64 exec_us,                        /* Execution time (us)              */
       handicap,                       /* Number of queue cycles behind    */
@@ -870,25 +876,25 @@ EXP_ST void read_bitmap(u8* fname) {
 
 #ifdef __x86_64__
 
-#define MASK_FTR     0xAAAAAAAAAAAAAAAAL
-#define MASK_VISITED 0x5555555555555555L
+#define MASK_FTR     0xAAAAAAAAAAAAAAAAUL
+#define MASK_VISITED 0x5555555555555555UL
 
 #else
 
-#define MASK_FTR     0xAAAAAAAAL
-#define MASK_VISITED 0x55555555L
+#define MASK_FTR     0xAAAAAAAAUL
+#define MASK_VISITED 0x55555555UL
 
 #endif
 
 //TODO: place has_new_frontier in code, then compute a score/ probability based on the frontier *proximity*
 
-static inline u8 has_new_frontier(u8* ftr_flag, u8* ftr_size) {
+static inline u8 has_new_frontier() {
 #ifdef __x86_64__
 
   u64* current = (u64*)(trace_bits + MAP_SIZE);
   u64* current_hits = (u64*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE + MAP_SIZE);
   u64* flag  = (u64*)ftr_flag;
-  u64* sizes  = (u64*)(ftr_size + MAP_SIZE);
+  u64* max_hits  = (u64*)(ftr_max_hits + MAP_SIZE);
 
   u64 ftr_bit;
 
@@ -899,7 +905,7 @@ static inline u8 has_new_frontier(u8* ftr_flag, u8* ftr_size) {
   u32* current = (u32*)(trace_bits + MAP_SIZE);
   u32* current_hits = (u32*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE + MAP_SIZE);
   u32* flag  = (u32*)ftr_flag;
-  u32* sizes  = (u32*)(ftr_size + MAP_SIZE);
+  u32* max_hits  = (u32*)(ftr_max_hits + MAP_SIZE);
 
   u32 ftr_bit;
 
@@ -912,7 +918,7 @@ static inline u8 has_new_frontier(u8* ftr_flag, u8* ftr_size) {
   while (i--) {
 
     current_hits -= FTR_FLAG_PACK;
-    sizes -= FTR_FLAG_PACK;
+    max_hits -= FTR_FLAG_PACK;
 
     /* Optimize for unreachable locations. */
 
@@ -933,7 +939,7 @@ static inline u8 has_new_frontier(u8* ftr_flag, u8* ftr_size) {
 
         /* Approximate maximum of the sizes, without much loss of performance */
 
-        current_hits[i * FTR_FLAG_PACK + j] |= sizes[i * FTR_FLAG_PACK + j];
+        current_hits[i * FTR_FLAG_PACK + j] |= max_hits[i * FTR_FLAG_PACK + j];
 
       }
 
@@ -1118,6 +1124,41 @@ static u32 count_non_255_bytes(u8* mem) {
   }
 
   return ret;
+
+}
+
+/* Counts the number of tuples marked as "frontier" and as "visited". This is
+   used soley for the status screen. */
+
+static void count_frontiers(u8* ftr_flags, u32* vis, u32* ftr) {
+
+  u32* ptr = (u32*)ftr_flags;
+  u32  i   = (MAP_FTR_SIZE >> 2);
+  u32  tmp, tmp_ftr = 0, tmp_vis = 0;
+
+  while (i--) {
+
+    /* Count the number of flags that denote frontiers and visited. */
+    tmp = *ptr;
+    tmp_ftr += __builtin_popcount(((tmp & 0xAAAAAAAAUL) >> 1) ^ (tmp & 0x55555555UL));
+    tmp_vis += __builtin_popcount(((tmp & 0xAAAAAAAAUL) >> 1) & (tmp & 0x55555555UL));
+
+    ptr++;
+  }
+
+  *vis = tmp_vis;
+  *ftr = tmp_ftr;
+
+  OKF("%d %d\n", *vis,  *ftr);
+}
+
+/*
+ *
+ */
+
+static u32 calc_frontier_proximity(u8* ftr_flags, u32* cur, u32* max) {
+
+
 
 }
 
@@ -1435,7 +1476,7 @@ EXP_ST void setup_shm(void) {
   memset(virgin_tmout, 255, MAP_SIZE);
   memset(virgin_crash, 255, MAP_SIZE);
 
-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+  shm_id = shmget(IPC_PRIVATE, MAP_SIZE + MAP_SIZE + MAP_FTR_SIZE, IPC_CREAT | IPC_EXCL | 0600);
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
@@ -2720,6 +2761,9 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   q->handicap    = handicap;
   q->cal_failed  = 0;
 
+  if (first_run)
+    count_frontiers(trace_bits + MAP_SIZE, &q->visited, &q->frontiers);
+
   total_bitmap_size += q->bitmap_size;
   total_bitmap_entries++;
 
@@ -3966,6 +4010,9 @@ static void show_stats(void) {
   u32 banner_len, banner_pad;
   u8  tmp[256];
 
+  u32 ftr_all, vis_all;
+  double ftr_all_ratio, ftr_cur_ratio, vis_ftr_ratio, vis_ftr_cur_ratio;
+
   cur_ms = get_cur_time();
 
   /* If not enough time has passed since last UI update, bail out. */
@@ -3997,6 +4044,17 @@ static void show_stats(void) {
                cur_avg * (1.0 / AVG_SMOOTHING);
 
   }
+
+  /* Calculate percentage of frontiers. */
+  count_frontiers(ftr_flag, &vis_all, &ftr_all);
+  ftr_all_ratio = ((double)ftr_all * 100) / MAP_SIZE;
+  vis_ftr_cur_ratio = ((double)queue_cur->visited / queue_cur->frontiers);
+  if (!queue_cur->frontiers)
+    vis_ftr_cur_ratio = 0;
+  vis_ftr_ratio = ((double)vis_all / ftr_all);
+  if (!ftr_all)
+    vis_ftr_ratio = 0;
+  ftr_cur_ratio = ((double)queue_cur->frontiers * 100) / MAP_SIZE;
 
   last_ms = cur_ms;
   last_execs = total_execs;
@@ -4371,8 +4429,25 @@ static void show_stats(void) {
 
   }
 
-  SAYF(bV bSTOP "        trim : " cRST "%-37s " bSTG bVR bH20 bH2 bH2 bRB "\n"
-       bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, tmp);
+  SAYF(bV bSTOP "        trim : " cRST "%-37s " bSTG bVR bH20 bH2 bH2 bRB "\n", tmp);
+
+  SAYF(bVR bH cCYA bSTOP " frontier coverage " cRST bSTG bH30 bH2 bH bVL "\n");
+       //bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, tmp);
+
+  /* Show frontier information */
+
+  //TODO: make sure console size is big enough.
+
+  //TODO: colors?
+  sprintf(tmp, "%.3f / %.3f", vis_ftr_cur_ratio, vis_ftr_ratio);
+  SAYF(bV bSTOP " frontier-visited ratio : " cRST "%-27s" bSTG bV "\n", tmp);
+
+  //TODO: real stats
+  sprintf(tmp, "0.323");
+  SAYF(bV bSTOP "       proximity factor : " cRST "%-27s" bSTG bV "\n", tmp);
+
+  sprintf(tmp, "%.2f%% / %.2f%%", ftr_cur_ratio, ftr_all_ratio);
+  SAYF(bV bSTOP "              frontiers : " cRST "%-27s" bSTG bV bSTOP, tmp);
 
   /* Provide some CPU utilization stats. */
 
@@ -4396,25 +4471,27 @@ static void show_stats(void) {
 
     if (cpu_aff >= 0) {
 
-      SAYF(SP10 cGRA "[cpu%03u:%s%3u%%" cGRA "]\r" cRST, 
+      SAYF(SP10 cGRA "[cpu%03u:%s%3u%%" cGRA "]\n" bSTG,
            MIN(cpu_aff, 999), cpu_color,
            MIN(cur_utilization, 999));
 
     } else {
 
-      SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\r" cRST,
+      SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\n" bSTG,
            cpu_color, MIN(cur_utilization, 999));
  
    }
 
 #else
 
-    SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\r" cRST,
+    SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\n" bSTG,
          cpu_color, MIN(cur_utilization, 999));
 
 #endif /* ^HAVE_AFFINITY */
 
-  } else SAYF("\r");
+  } else SAYF("\n" bSTG);
+
+  SAYF(bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1 "\r");
 
   /* Hallelujah! */
 

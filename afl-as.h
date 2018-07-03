@@ -104,15 +104,21 @@
 
  */
 
-#define TRAMP_NORM ""
-#define TRAMP_FTR "_ftr"
+#define LOG_NORM ""
+#define LOG_FTR "_ftr"
 
+//TODO: local label naming convention for apple?
+#define LBL_GEN ".LL_%x"
+
+// loc, log_mode, label_name, [, frontier_loc]
 static const u8* trampoline_fmt_32 =
 
   "\n"
   "/* --- AFL TRAMPOLINE (32-BIT) --- */\n"
   "\n"
   ".align 4\n"
+  "\n"
+  "%3$s_ins:\n"
   "\n"
 #if FRONTIERS > FRONTIERS_NONE
   "leal -20(%%esp), %%esp\n"
@@ -123,12 +129,12 @@ static const u8* trampoline_fmt_32 =
   "movl %%edx,  4(%%esp)\n"
   "movl %%ecx,  8(%%esp)\n"
   "movl %%eax, 12(%%esp)\n"
-  "movl $0x%08x, %%ecx\n"
+  "movl $0x%1$08x, %%ecx\n"
 #if FRONTIERS > FRONTIERS_NONE
   "movl %%ebx, 16(%%esp)\n"
-  "movl $0x%08x, %%ebx\n"
+  "movl $0x%4$08x, %%ebx\n"
 #endif
-  "call __afl_maybe_log%s\n"
+  "call __afl_maybe_log%2$s\n"
 #if FRONTIERS > FRONTIERS_NONE
   "movl 16(%%esp), %%ebx\n"
 #endif
@@ -142,15 +148,20 @@ static const u8* trampoline_fmt_32 =
   "leal -16(%%esp), %%esp\n"
 #endif
   "\n"
+  "%3$s_skip_ins:\n"
+  "\n"
   "/* --- END --- */\n"
   "\n";
 
+// loc, log_mode, label_name[, frontier_loc]
 static const u8* trampoline_fmt_64 =
 
   "\n"
   "/* --- AFL TRAMPOLINE (64-BIT) --- */\n"
   "\n"
   ".align 4\n"
+  "\n"
+  "%3$s_inst:\n"
   "\n"
 #if FRONTIERS > FRONTIERS_NONE
   "leaq -(128+32)(%%rsp), %%rsp\n"
@@ -160,12 +171,12 @@ static const u8* trampoline_fmt_64 =
   "movq %%rdx,  0(%%rsp)\n"
   "movq %%rcx,  8(%%rsp)\n"
   "movq %%rax, 16(%%rsp)\n"
-  "movq $0x%08x, %%rcx\n"
+  "movq $0x%1$08x, %%rcx\n"
 #if FRONTIERS > FRONTIERS_NONE
   "movq %%rbx, 24(%%rsp)\n"
-  "movq $0x%08x, %%rbx\n"
+  "movq $0x%4$08x, %%rbx\n"
 #endif
-  "call __afl_maybe_log%s\n"
+  "call __afl_maybe_log%2$s\n"
 #if FRONTIERS > FRONTIERS_NONE
   "movq 24(%%rsp), %%rbx\n"
 #endif
@@ -177,6 +188,8 @@ static const u8* trampoline_fmt_64 =
 #else
   "leaq (128+24)(%%rsp), %%rsp\n"
 #endif
+  "\n"
+  "%3$s_skip_inst:\n"
   "\n"
   "/* --- END --- */\n"
   "\n";
@@ -436,7 +449,7 @@ static const u8* main_payload_32 =
 #if FRONTIERS > FRONTIERS_NONE
   "  /* Check if the *not taken* branch location is set. This is the case for\n"
   "     conditional branches. We make two separate procs because a branch in the\n"
-  "     __afl_store/__afl_maybe_log will be pretty expensive. */"
+  "     __afl_store/__afl_maybe_log will be pretty expensive. */\n"
   "  test %ebx, %ebx\n"
   "  jne  __afl_store_ftr\n"
 #endif
@@ -531,8 +544,8 @@ static const u8* main_payload_64 =
   "  incb (%rdx, %rcx, 1)\n"
 #endif /* ^SKIP_COUNTS */
   "\n"
-  "  /* Store the frontier branch flags. This one is reversed of the 32-bit"
-  "     counterpart, i.e. we start with marking current branch as visited, "
+  "  /* Store the frontier branch flags. This one is reversed of the 32-bit\n"
+  "     counterpart, i.e. we start with marking current branch as visited, \n"
   "     then the other branch as frontier. */\n"
   "\n"
 #if FRONTIERS >= FRONTIERS_COUNT
@@ -816,7 +829,7 @@ static const u8* main_payload_64 =
 #if FRONTIERS > FRONTIERS_NONE
   "  /* Check if the *not taken* branch location is set. This is the case for\n"
   "     conditional branches. We make two separate procs because a branch in the\n"
-  "     __afl_store/__afl_maybe_log will be pretty expensive. */"
+  "     __afl_store/__afl_maybe_log will be pretty expensive. */\n"
   "  test %rbx, %rbx\n"
   "  jne  __afl_store_ftr\n"
 #endif
