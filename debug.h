@@ -194,6 +194,17 @@
     SAYF(cRST "\n"); \
   } while (0)
 
+/* Assert failure */
+#define ASSERT(cond) do { \
+    if (!(cond)) { \
+      SAYF(bSTOP RESET_G1 CURSOR_SHOW cRST cLRD "\n[-] PROGRAM ABORT : " \
+         cBRI "ASSERT FAILURE: %s", #cond); \
+      SAYF(cLRD "\n         Location : " cRST "%s(), %s:%u\n\n", \
+           __FUNCTION__, __FILE__, __LINE__); \
+      exit(1); \
+    } \
+  } while (0)
+
 /* Die with a verbose non-OS fatal error message. */
 
 #define FATAL(x...) do { \

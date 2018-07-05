@@ -108,7 +108,9 @@
 #define LOG_FTR "_ftr"
 
 //TODO: local label naming convention for apple?
-#define LBL_GEN ".LL_%x"
+#define LBL_GEN_L ".LL%s"
+#define LBL_GEN_J ".LLJ%s_%d"
+#define LBL_GEN_F ".LLF%s"
 
 // loc, log_mode, label_name, [, frontier_loc]
 static const u8* trampoline_fmt_32 =

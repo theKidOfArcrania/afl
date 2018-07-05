@@ -349,7 +349,53 @@ The paths where variable behavior is detected are marked with a matching entry
 in the <out_dir>/queue/.state/variable_behavior/ directory, so you can look
 them up easily.
 
-9) CPU load
+9) Frontier coverage
+--------------------
+
+ +-----------------------------------------------------+
+ | visited-frontier ratio : 1.122 / 2.248              |
+ |       proximity degree : 1045 / 926 / 16565         |
+ |      average proximity : 947.74 ± 134.49            |
+ |              frontiers : 2.01% / 6.49%              |
+ +-----------------------------------------------------+
+
+This part of the statistics window (added with afl-ftr support) helps give some
+quick information about the frontier coverage that has been done. To explain
+what a frontier is, it specifies a code location that have NOT been visited,
+but can be reached by going down the other fork of a visited conditional
+branch.
+
+These consist of four different statistic, each explained in a bullet point.
+
+  - Visited-frontier ratio: this determines the ratio between the number of
+    code locations that have been visited, vs the code locations that are
+    frontiers. There are two sub-values: one measures the vis-ftr ratio for the
+    most recently generated input, the other is the overall (or cumulative)
+    vis-ftr ratio. If this value gets low, i.e. < .2, then probably your binary
+    is probably thoroughly explored, and AFL-FTR will most likely not find a
+    lot more significant paths to go down. Typically this number should be above
+    1, which means there are plenty of frontiers AFL can explore.
+
+  - Proximity degree: this determines the "proximity" of an input sample to the
+    currently existing frontiers. This is determined by two factors: (1) the
+    total number of frontiers that it reaches, and (2) the logarithm (approx)
+    of the total hit count that reaches the conditional branch leading to the
+    frontier. There are three sub-values: one for the current input, one for
+    the input seed that this current input is derived from, and one for the
+    "maximum" proximity possible, combined from all seen input cases.
+
+  - Average proximity: this determines the approximate average proximity of the
+    most recent one thousand (by default) input cases. The average is
+    determined by a decay factor, which will decay the earliest proximitiy
+    values more so than the more recent proximity values. It also supplies the
+    average deviation, computed in a decay format similar to its average.
+
+  - Frontiers: this shows the percentage of frontier locations within the
+    bitmap. As with the others, there is a percentage for the current input, and
+    one for the overall cumulative (maximum) frontier data.
+
+
+10) CPU load
 -----------
 
   [cpu: 25%]
@@ -373,7 +419,7 @@ performance characteristics of each of these will differ quite a bit.
 If you want a more accurate measurement, you can run the afl-gotcpu utility
 from the command line.
 
-10) Addendum: status and plot files
+11) Addendum: status and plot files
 -----------------------------------
 
 For unattended operation, some of the key status screen information can be also

@@ -253,6 +253,16 @@
  *                                                         *
  ***********************************************************/
 
+/* The cap in the number of recent proximity measurements to keep.  */
+
+#define PROX_CAP            1000
+
+/* The decay multiplier used for dropping some number of stale proxmity
+   measurements. Since we do not know the oldest values that are being
+   dropped, we can compensate by increasing this multiple. */
+
+#define PROX_CAP_DECAY_MULT 1
+
 /* Call count interval between reseeding the libc PRNG from /dev/urandom: */
 
 #define RESEED_RNG          10000
@@ -315,7 +325,7 @@
 
 #define MAP_SIZE_POW2       16
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
-#define MAP_FTR_SIZE       (MAP_SIZE >> 2)
+#define MAP_FTR_SIZE        (MAP_SIZE >> 2)
 
 /* Maximum allocator request size (keep well under INT_MAX): */
 

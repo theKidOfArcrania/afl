@@ -66,6 +66,7 @@ typedef struct __inst_data {
 } ins_data;
 
 typedef struct __label_data {
+  u8* alias;
   u32 loc_label;
   u32 loc_fallthrough;
   u8  type;
@@ -244,53 +245,99 @@ static void edit_params(int argc, char** argv) {
 
 }
 
-static u32 update_label(map_t syms, int is_jmp, const u8* lbl, enum label_type type) {
+static const u8* resolve_alias(map_t syms, const u8* lbl, label_data** pldata) {
+  const u8* before = lbl;
+
+  label_data* tmp;
+
+  if (!pldata) pldata = &tmp;
+
+  *pldata = NULL;
+
+  do {
+
+    if (*pldata)
+
+      lbl = (*pldata)->alias;
+
+    if (hashmap_get(syms, lbl, (void **) pldata) == MAP_MISSING) {
+      *pldata = NULL;
+      fprintf(stderr, "Resoluion failed for `%s'\n", before);
+      return NULL;
+    }
+
+  } while ((*pldata)->alias);
+
+  fprintf(stderr, "Resolved `%s' to `%s'\n", before, lbl);
+
+  return lbl;
+}
+
+static void create_label_alias(map_t syms, const u8* lbl, const u8* aliasTo) {
   label_data* ldata;
   if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+
     ldata = ck_alloc(sizeof(label_data));
     hashmap_put(syms, lbl, ldata);
+
+  } else {
+
+    ck_free(ldata->alias);
+
+  }
+
+  ldata->alias = ck_strdup(aliasTo);
+}
+
+static u32 update_label(map_t syms, int is_jmp, const u8* lbl, enum label_type type) {
+  label_data* ldata;
+
+  resolve_alias(syms, lbl, &ldata);
+
+  if (!ldata) {
+
+    ldata = ck_alloc(sizeof(label_data));
+    hashmap_put(syms, lbl, ldata);
+
   }
 
   ldata->type = max(ldata->type, (u8)type);
 
   u32 ret = (u32)R(MAP_SIZE);
+
   if (is_jmp) {
+
     if (!ldata->loc_fallthrough)
       ldata->loc_fallthrough = ret;
+
   } else {
+
     ldata->loc_label = ret;
+
   }
   return ret;
 }
 
 static void get_label(map_t syms, int is_jmp, const u8* lbl, u32* label_type, u32* frontier) {
   label_data* ldata;
-  if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+
+  resolve_alias(syms, lbl, &ldata);
+
+  if (!ldata) {
     *label_type = LTYPE_NULL;
     return;
   }
 
   *label_type = ldata->type;
-  *frontier = (is_jmp ? ldata->loc_label : ldata->loc_fallthrough);
-}
 
-static int check_label_used(map_t syms, const u8* lbl) {
-  label_data* ldata;
-  if (hashmap_get(syms, lbl, (void**)&ldata) == MAP_MISSING) {
+  if (frontier)
 
-    FATAL("assert error.");
-
-  }
-
-  int used = ldata->used;
-
-  ldata->used = 1;
-
-  return used;
+    *frontier = (is_jmp ? ldata->loc_label : ldata->loc_fallthrough);
 }
 
 static int clean_sym(any_t key, any_t val) {
   label_data* ldata = val;
+  ck_free(ldata->alias);
   ck_free(ldata);
   return MAP_OK;
 }
@@ -323,32 +370,38 @@ static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_j
 
   }
 
-  SAYF("Adding instrumentation for `%s'%s\n", ins->lblName, ftr_loc == 0 ? "" :
-        (is_jmp ? " (conditional, fall)" : " (conditional, jmp)"));
+  SAYF("Adding instrumentation for `%s'%s \n", ins->lblName, ftr_loc == 0 ?
+        (ins_type == LTYPE_FUNCT ? "(function)" : "(unknown)") :
+        (is_jmp ? "(conditional, fall)" : "(conditional, jmp)"));
 
-  if (is_jmp && !check_label_used(syms, ins->lblName)) {
+  const u8* idName = resolve_alias(syms, ins->lblName, NULL);
+  ASSERT(idName);
 
-    lbl_genname = alloc_printf(LBL_GEN "_%d", ins->loc, ctr++);
-
-  } else {
-
-    lbl_genname = alloc_printf(LBL_GEN, ins->loc);
-
-  }
-
-
-
+  idName += 2;
 
   if (!is_jmp && ftr_loc != 0) {
 
     /* Prevent normal fall-through in labels, see add_instrumentation for
        more info. */
 
-    fprintf(outf, "\tjmp %s_skip_inst", lbl_genname);
+    fprintf(outf, "\tjmp " LBL_GEN_L "_skip_inst", idName);
 
   }
 
+  if (is_jmp) {
 
+    lbl_genname = alloc_printf(LBL_GEN_J, idName, ctr++);
+
+  } else if (ins_type == LTYPE_FUNCT) {
+
+    ASSERT(ins->lblName == idName - 2);
+    lbl_genname = alloc_printf(LBL_GEN_F, ins->lblName);
+
+  } else {
+
+    lbl_genname = alloc_printf(LBL_GEN_L, idName);
+
+  }
 
 #if FRONTIERS > FRONTIERS_NONE
   fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
@@ -377,7 +430,7 @@ static void add_instrumentation(void) {
 
   static u8 line[MAX_LINE];
 
-  static u8 cur_label[MAX_LINE];
+  static u8 cur_label[MAX_LINE], tmp_label[MAX_LINE];
 
   map_t syms = hashmap_new();
 
@@ -391,12 +444,12 @@ static void add_instrumentation(void) {
   u32 line_num = 0; // 1-based index!
   u32 total_lines = 0;
 
-  u8  instr_ok = 0, skip_csect = 0, skip_next_label = 0,
+  u8  instr_ok = 0, skip_csect = 0, //skip_next_label = 0,
       skip_intel = 0, skip_app = 0, instrument_next = 0;
 
   u8 *colon_pos, *inst_name;
 
-  u32 lbl_type, lbl_loc;
+  u32 lbl_type;
 
   ins_data** ins_lbl;
   ins_data** ins_jmp;
@@ -440,16 +493,22 @@ static void add_instrumentation(void) {
   ins_jmp = ck_alloc(sizeof(ins_data*) * total_lines);
   ins_jcond = ck_alloc(sizeof(ins_data*) * total_lines);
 
-  while (fgets(line, MAX_LINE, inf)) {
+  if (pass_thru) goto pass_thru_write;
 
-    line_num++;
+  while (++line_num <= total_lines) {
+
+    if (!fgets(line, MAX_LINE, inf)) {
+
+      PFATAL("Unable to read from file!");
+
+    }
 
     /* In some cases, we want to defer writing the instrumentation trampoline
        until after all the labels, macros, comments, etc. If we're in this
        mode, and if the line starts with a tab followed by a character, dump
        the trampoline now. */
 
-    if (!pass_thru && !skip_intel && !skip_app && !skip_csect && instr_ok &&
+    if (!skip_intel && !skip_app && !skip_csect && instr_ok &&
         instrument_next && line[0] == '\t' && isalpha(line[1])) {
 
       /* Update the map of symbols with this label. We add this label if it
@@ -469,10 +528,6 @@ static void add_instrumentation(void) {
       instrument_next = 0;
 
     }
-
-    /* Call it a day in pass-thru mode. */
-
-    if (pass_thru) continue;
 
     /* All right, this is where the actual fun begins. For one, we only want to
        instrument the .text section. So, let's keep track of that in processed
@@ -696,9 +751,7 @@ static void add_instrumentation(void) {
              .Lfunc_begin0-style exception handling calculations (a problem on
              MacOS X). */
 
-          if (!skip_next_label) instrument_next = 1; else skip_next_label = 0;
-
-          SAYF("Found label `%s' (local)\n", cur_label);
+          //if (!skip_next_label) instrument_next = 1; else skip_next_label = 0;
 
         } else {
 
@@ -710,17 +763,37 @@ static void add_instrumentation(void) {
 
         /* Function label (always instrumented, deferred mode). */
 
-        instrument_next = 1;
 
-        SAYF("Found label `%s' (function)\n", cur_label);
 
       }
 
       /* Get the label */
 
-      strncpy(cur_label, line, (u32)(colon_pos - line));
+      if (instrument_next) {
 
-      cur_label[colon_pos - line] = 0;
+        /* We are still searching for an instruction to instrument before.
+           Make sure that we mark this label as an alias to the already seen
+           label! */
+
+        strncpy(tmp_label, line, (u32)(colon_pos - line));
+
+        tmp_label[colon_pos - line] = 0;
+
+        create_label_alias(syms, tmp_label, cur_label);
+
+        SAYF("Found label alias `%s'\n", cur_label);
+
+      } else {
+
+        strncpy(cur_label, line, (u32)(colon_pos - line));
+
+        cur_label[colon_pos - line] = 0;
+
+        SAYF("Found label `%s'\n", cur_label);
+
+      }
+
+      instrument_next = 1;
 
     }
 
@@ -729,6 +802,8 @@ static void add_instrumentation(void) {
   rewind(inf);
 
   line_num = 0;
+
+pass_thru_write:
 
   while (++line_num <= total_lines) {
 
@@ -755,11 +830,14 @@ static void add_instrumentation(void) {
 
       /* Modify jmp label */
 
-      get_label(syms, 1, ins->lblName, &lbl_type, &lbl_loc);
+      const u8* cannName = resolve_alias(syms, ins->lblName, NULL);
+      ASSERT(cannName);
+
+      get_label(syms, 1, ins->lblName, &lbl_type, NULL);
 
       if (lbl_type == LTYPE_COND) {
 
-        fprintf(outf, "\tjmp "LBL_GEN"_skip_inst\n", lbl_loc);
+        fprintf(outf, "\tjmp "LBL_GEN_L"_skip_inst\n", cannName + 2);
 
         continue;
 
@@ -769,11 +847,12 @@ static void add_instrumentation(void) {
 
       /* Modify jcond label */
 
-      get_label(syms, 1, ins->lblName, &lbl_type, &lbl_loc);
+      const u8* cannName = resolve_alias(syms, ins->lblName, NULL);
+      ASSERT(cannName);
 
       inst_name = strtok(line + 1, "\t \n\r");
 
-      fprintf(outf, "\t%s\t"LBL_GEN"_inst\n", inst_name, lbl_loc);
+      fprintf(outf, "\t%s\t"LBL_GEN_L"_inst\n", inst_name, cannName + 2);
 
       /* Add profiling to jcond fall through*/
 
