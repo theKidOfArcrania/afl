@@ -222,7 +222,7 @@ static u64 total_bitmap_size,         /* Total bit count for all bitmaps  */
 
 EXP_ST double cap_prox_total,         /* Sums of proximity, capped        */
               cap_prox_dev;           /* Deviance sums, capped            */
-EXP_ST int    prox_count;             /* Number of proximities measured   */
+EXP_ST u32    prox_count;             /* Number of proximities measured   */
 
 static s32 cpu_core_count;            /* CPU core count                   */
 
@@ -4189,7 +4189,6 @@ static void show_stats(void) {
   count_frontiers(ftr_flag, &vis_all, &ftr_all);
   count_frontiers(trace_bits + MAP_SIZE, &vis_cur, &ftr_cur);
 
-
   ftr_all_ratio = ((double)ftr_all * 100) / MAP_SIZE;
 
   vis_ftr_cur_ratio = ((double)vis_cur / ftr_cur);
@@ -4997,7 +4996,7 @@ static u32 choose_block_len(u32 limit) {
 static u32 calculate_score(struct queue_entry* q) {
 
   u32 avg_exec_us = total_cal_us / total_cal_cycles;
-  u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
+  //u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
   u32 avg_proximity = (u32)(cap_prox_total / prox_count);
   u32 perf_score = 100;
 

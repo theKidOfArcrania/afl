@@ -246,7 +246,7 @@ static void edit_params(int argc, char** argv) {
 }
 
 static const u8* resolve_alias(map_t syms, const u8* lbl, label_data** pldata) {
-  const u8* before = lbl;
+  //const u8* before = lbl;
 
   label_data* tmp;
 
@@ -262,13 +262,13 @@ static const u8* resolve_alias(map_t syms, const u8* lbl, label_data** pldata) {
 
     if (hashmap_get(syms, lbl, (void **) pldata) == MAP_MISSING) {
       *pldata = NULL;
-      fprintf(stderr, "Resoluion failed for `%s'\n", before);
+      //SAYF("Resolution failed for `%s'\n", before);
       return NULL;
     }
 
   } while ((*pldata)->alias);
 
-  fprintf(stderr, "Resolved `%s' to `%s'\n", before, lbl);
+  //SAYF("Resolved `%s' to `%s'\n", before, lbl);
 
   return lbl;
 }
@@ -343,7 +343,7 @@ static int clean_sym(any_t key, any_t val) {
 }
 
 static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_jmp) {
-  static ctr = 0;
+  static u32 ctr = 0;
 
   int res = 0;
   u32 ftr_loc, ins_type;
@@ -370,9 +370,9 @@ static int write_instrumentation(FILE* outf, map_t syms, ins_data* ins, int is_j
 
   }
 
-  SAYF("Adding instrumentation for `%s'%s \n", ins->lblName, ftr_loc == 0 ?
-        (ins_type == LTYPE_FUNCT ? "(function)" : "(unknown)") :
-        (is_jmp ? "(conditional, fall)" : "(conditional, jmp)"));
+  //SAYF("Adding instrumentation for `%s'%s \n", ins->lblName, ftr_loc == 0 ?
+  //      (ins_type == LTYPE_FUNCT ? "(function)" : "(unknown)") :
+  //      (is_jmp ? "(conditional, fall)" : "(conditional, jmp)"));
 
   const u8* idName = resolve_alias(syms, ins->lblName, NULL);
   ASSERT(idName);
@@ -519,7 +519,7 @@ static void add_instrumentation(void) {
 
       /* Record this line as instrumented. */
 
-      SAYF("Marking `%s' for instrumentation\n", cur_label);
+      //SAYF("Marking `%s' for instrumentation\n", cur_label);
 
       ins_data* cur_ins = ins_lbl[line_num - 1] = ck_alloc(sizeof(ins_data));
       cur_ins->lblName = ck_strdup(cur_label);
@@ -668,7 +668,7 @@ static void add_instrumentation(void) {
              jumps to a J<cond> label, we might want it to jump over
              instrumentation instead. Let's record it just in case. */
 
-          SAYF("No instrumentation for `%s'\n", cur_label);
+          //SAYF("No instrumentation for `%s'\n", cur_label);
 
           update_label(syms, 1, cur_label, LTYPE_JMP);
 
@@ -682,7 +682,7 @@ static void add_instrumentation(void) {
              usage, so that we are sure to instrument this. */
           tmp_loc = update_label(syms, 1, cur_label, LTYPE_COND);
 
-          SAYF("Marking `%s' for instrumentation (conditional)\n", cur_label);
+          //SAYF("Marking `%s' for instrumentation (conditional)\n", cur_label);
 
           /* Record this line as instrumented. */
           ins_data* cur_ins = ins_jcond[line_num - 1] = ck_alloc(sizeof(ins_data));
@@ -781,7 +781,7 @@ static void add_instrumentation(void) {
 
         create_label_alias(syms, tmp_label, cur_label);
 
-        SAYF("Found label alias `%s'\n", cur_label);
+        //SAYF("Found label alias `%s'\n", cur_label);
 
       } else {
 
@@ -789,7 +789,7 @@ static void add_instrumentation(void) {
 
         cur_label[colon_pos - line] = 0;
 
-        SAYF("Found label `%s'\n", cur_label);
+        //SAYF("Found label `%s'\n", cur_label);
 
       }
 
@@ -809,7 +809,7 @@ pass_thru_write:
 
     ins_data* ins;
 
-    if (ins = ins_lbl[line_num - 1])
+    if ((ins = ins_lbl[line_num - 1]))
 
       ins_lines += write_instrumentation(outf, syms, ins, 0);
 
@@ -826,7 +826,7 @@ pass_thru_write:
        ordinary "fall-through" of the label (in write_instrumentation),
        the second part is to modify the target of the jump label. */
 
-    if (ins = ins_jmp[line_num - 1]) {
+    if ((ins = ins_jmp[line_num - 1])) {
 
       /* Modify jmp label */
 
