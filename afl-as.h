@@ -248,6 +248,8 @@ static const u8* main_payload_32 =
   "\n"
 #if FRONTIERS >= FRONTIERS_COUNT
   "  incb " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%edx, %ebx)\n"
+#else
+  "  movb $1, " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%edx, %ebx)\n"
 #endif
   "\n"
   "  mov %ebx, %edi\n"
@@ -552,6 +554,8 @@ static const u8* main_payload_64 =
   "\n"
 #if FRONTIERS >= FRONTIERS_COUNT
   "  incb " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%rdx, %rbx)\n"
+#else
+  "  movb $1, " STRINGIFY((MAP_SIZE + MAP_FTR_SIZE)) "(%rdx, %rbx)\n"
 #endif
   "  mov %cl, %al\n"
   "  and $3, %cl\n"
