@@ -5016,12 +5016,12 @@ static u32 calculate_score(struct queue_entry* q) {
      exposes. The input cases more exposed to the frontiers will probably give
      more chances of making breakthroughs */
 
-  if (q->cur_prox * 0.3 > avg_proximity) perf_score *= 6;
-  else if (q->cur_prox * 0.5 > avg_proximity) perf_score *= 4;
-  else if (q->cur_prox * 0.75 > avg_proximity) perf_score *= 3;
-  else if (q->cur_prox * 3 < avg_proximity) perf_score *= 0.1;
-  else if (q->cur_prox * 2 < avg_proximity) perf_score *= 0.3;
-  else if (q->cur_prox * 1.5 < avg_proximity) perf_score *= 0.5;
+  if (q->cur_prox - 3 * cap_prox_dev > avg_proximity) perf_score *= 6;
+  else if (q->cur_prox - 2 * cap_prox_dev > avg_proximity) perf_score *= 4;
+  else if (q->cur_prox - 1 * cap_prox_dev > avg_proximity) perf_score *= 3;
+  else if (q->cur_prox + 3 * cap_prox_dev < avg_proximity) perf_score *= 0.1;
+  else if (q->cur_prox + 2 * cap_prox_dev < avg_proximity) perf_score *= 0.3;
+  else if (q->cur_prox + 1 * cap_prox_dev < avg_proximity) perf_score *= 0.5;
 
   /* Adjust score based on bitmap size. The working theory is that better
      coverage translates to better targets. Multiplier from 0.25x to 3x. */
