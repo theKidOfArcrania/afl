@@ -142,11 +142,6 @@ EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
            virgin_crash[MAP_SIZE];    /* Bits we haven't seen in crashes  */
 
-EXP_ST u8  ftr_flag[MAP_FTR_SIZE],    /* Bit flag for frontiers           */
-           ftr_max_hits[MAP_SIZE];    /* Approx max hit coverages in bits */
-
-EXP_ST u32 max_prox = 0;
-
 static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
 static s32 shm_id;                    /* ID of the SHM region             */
@@ -881,7 +876,6 @@ EXP_ST void read_bitmap(u8* fname) {
 
 }
 
-#define FTR_FLAG_PACK 4
 #define FRONTIER_BIT(val) ((((val) & MASK_FTR) >> 1) ^ ((val) & MASK_VISITED))
 #define VISITED_BIT(val) ((((val) & MASK_FTR) >> 1) & ((val) & MASK_VISITED))
 
@@ -894,13 +888,13 @@ EXP_ST void read_bitmap(u8* fname) {
 
 #ifdef __x86_64__
 
-#define MASK_FTR     0xAAAAAAAAAAAAAAAAUL
-#define MASK_VISITED 0x5555555555555555UL
+#define MASK_FTR     0x0202020202020202UL
+#define MASK_VISITED 0x0101010101010101UL
 
 #else
 
-#define MASK_FTR     0xAAAAAAAAUL
-#define MASK_VISITED 0x55555555UL
+#define MASK_FTR     0x02020202U
+#define MASK_VISITED 0x01010101U
 
 #endif
 
@@ -915,10 +909,8 @@ static void calculate_frontier_proximity(u32 *cur_prox) {
 
   u64* cur_flag = (u64*)(trace_bits + MAP_SIZE);
   u64* current_hits = (u64*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE);
-  u64* gbl_flag  = (u64*)ftr_flag;
-  u64* max_hits  = (u64*)ftr_max_hits;
 
-  u64  ftr_bit, ftr_gbl_bit;
+  u64  ftr_bit;
 
   u32  ct = (MAP_FTR_SIZE >> 3);
 
@@ -926,8 +918,6 @@ static void calculate_frontier_proximity(u32 *cur_prox) {
 
   u32* cur_flag = (u32*)(trace_bits + MAP_SIZE);
   u32* current_hits = (u32*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE);
-  u32* gbl_flag  = (u32*)ftr_flag;
-  u32* max_hits  = (u32*)ftr_max_hits;
 
   u32  ftr_bit, ftr_gbl_bit;
 
@@ -936,21 +926,18 @@ static void calculate_frontier_proximity(u32 *cur_prox) {
 #endif /* ^__x86_64__ */
 
   u32 tmpCur = 0;
-  u32 tmpMax = 0;
 
   while (ct--) {
 
     /* Optimize for unreachable locations. */
 
-    if (likely(!(*cur_flag | *gbl_flag)))
+    if (likely(!(*cur_flag)))
 
       goto incr;
 
-    /* Test whether if the FRONTIER mask is set (and not already visited) AND
-       whether this is already visited in the global flags. */
+    /* Test whether if the FRONTIER mask is set (and not already visited) */
 
-    ftr_gbl_bit = FRONTIER_BIT(*gbl_flag);
-    ftr_bit = FRONTIER_BIT(*cur_flag) & ~VISITED_BIT(*gbl_flag);
+    ftr_bit = FRONTIER_BIT(*cur_flag);
 
     u32 i = 0;
 
@@ -971,34 +958,13 @@ static void calculate_frontier_proximity(u32 *cur_prox) {
 
     }
 
-    i = 0;
-    while (ftr_gbl_bit) {
-
-      if (ftr_gbl_bit & 1) {
-
-#ifdef __x86_64__
-        tmpMax += __popcntd((u8)(max_hits[i >> 3] >> ((i & 7) << 3)));
-#else
-        tmpMax += __popcntd((u8)(max_hits[i >> 2] >> ((i & 3) << 3)));
-#endif // __x86_64__
-
-      }
-
-      i++;
-      ftr_gbl_bit >>= 2;
-
-    }
-
-    incr:
+incr:
     cur_flag++;
-    gbl_flag++;
-    current_hits += FTR_FLAG_PACK;
-    max_hits += FTR_FLAG_PACK;
+    current_hits++;
 
   }
 
   *cur_prox = tmpCur;
-  max_prox = tmpMax;
 
   //Compute current proximity and deviance
   double dev = tmpCur - (cap_prox_total / (prox_count ? prox_count : 1));
@@ -1014,89 +980,6 @@ static void calculate_frontier_proximity(u32 *cur_prox) {
     prox_count++;
   }
 
-}
-
-/* Updates the frontier information, adding the collective visited/frontier
-   elements in the current input sample. It takes the frontier flags/hit count
-   of the trace_bits and then unions them with the global flags and max hits.*/
-
-static inline u8 update_frontier(u32* cur_prox) {
-
-#ifdef __x86_64__
-
-  u64* current = (u64*)(trace_bits + MAP_SIZE);
-  u64* current_hits = (u64*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE);
-  u64* gbl_flag  = (u64*)ftr_flag;
-  u64* max_hits  = (u64*)ftr_max_hits;
-
-  u64  ftr_bit;
-
-  u32  ct = (MAP_FTR_SIZE >> 3);
-
-#else
-
-  u32* current = (u32*)(trace_bits + MAP_SIZE);
-  u32* current_hits = (u32*)(trace_bits + MAP_SIZE + MAP_FTR_SIZE);
-  u32* gbl_flag  = (u32*)ftr_flag;
-  u32* max_hits  = (u32*)ftr_max_hits;
-
-  u32  ftr_bit;
-
-  u32  ct = (MAP_FTR_SIZE >> 2);
-
-#endif /* ^__x86_64__ */
-
-  u8 ret = 0;
-
-  while (ct--) {
-
-    /* Optimize for unreachable locations. */
-
-    if (likely(!*current))
-
-      goto incr;
-
-    /* Update global frontier flags. */
-
-    *gbl_flag |= *current;
-
-    /* Test whether if exactly the FRONTIER mask is set (and not already visited).
-       Then test whether if these corresponding frontiers are still frontiers. */
-
-    ftr_bit = FRONTIER_BIT(*current);
-
-    if (unlikely(ftr_bit) && unlikely(ftr_bit & FRONTIER_BIT(*gbl_flag))) {
-
-      ret = 1;
-
-      for (u8 j = 0; j < FTR_FLAG_PACK; j++) {
-
-        /* Approximate maximum of the sizes. We might as well also set those bits
-           that aren't frontiers, since they don't really matter anyways :p */
-
-        max_hits[j] |= current_hits[j];
-
-      }
-
-    }
-
-incr:
-    current++;
-    gbl_flag++;
-    current_hits += FTR_FLAG_PACK;
-    max_hits += FTR_FLAG_PACK;
-
-  }
-
-  if (ret)
-
-    calculate_frontier_proximity(cur_prox);
-
-  else
-
-    *cur_prox = 0;
-
-  return ret;
 }
 
 /* Check if the current execution path brings anything new to the table.
@@ -2854,7 +2737,6 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
 
     if (q->exec_cksum != cksum) {
-      update_frontier(&q->cur_prox);
       u8 hnb = has_new_bits(virgin_bits);
       if (hnb > new_bits) new_bits = hnb;
 
@@ -2899,8 +2781,14 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   q->handicap    = handicap;
   q->cal_failed  = 0;
 
-  if (first_run)
+#if FRONTIERS > FRONTIERS_NONE
+  if (first_run) {
+
+    calculate_frontier_proximity(&q->cur_prox);
     count_frontiers(trace_bits + MAP_SIZE, &q->visited, &q->frontiers);
+
+  }
+#endif
 
   total_bitmap_size += q->bitmap_size;
   total_bitmap_entries++;
@@ -3395,12 +3283,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
 
-    update_frontier(&queue_top->cur_prox);
+#if FRONTIERS > FRONTIERS_NONE
+    calculate_frontier_proximity(&queue_top->cur_prox);
 
     if (!(hnb = has_new_bits(virgin_bits))) {
       if (crash_mode) total_crashes++;
       return 0;
     }
+#endif
 
 #ifndef SIMPLE_FILES
 
@@ -4150,8 +4040,8 @@ static void show_stats(void) {
   u32 banner_len, banner_pad;
   u8  tmp[256];
 
-  u32 ftr_all, vis_all, ftr_cur, vis_cur, cur_prox;
-  double ftr_all_ratio, ftr_cur_ratio, vis_ftr_ratio, vis_ftr_cur_ratio;
+  u32 ftr_cur, vis_cur, cur_prox;
+  double ftr_cur_ratio, vis_ftr_cur_ratio;
 
   cur_ms = get_cur_time();
 
@@ -4185,23 +4075,18 @@ static void show_stats(void) {
 
   }
 
+#if FRONTIERS > FRONTIERS_NONE
   /* Calculate percentage of frontiers. */
-  count_frontiers(ftr_flag, &vis_all, &ftr_all);
   count_frontiers(trace_bits + MAP_SIZE, &vis_cur, &ftr_cur);
-
-  ftr_all_ratio = ((double)ftr_all * 100) / MAP_SIZE;
 
   vis_ftr_cur_ratio = ((double)vis_cur / ftr_cur);
   if (!ftr_cur)
     vis_ftr_cur_ratio = 0;
 
-  vis_ftr_ratio = ((double)vis_all / ftr_all);
-  if (!ftr_all)
-    vis_ftr_ratio = 0;
-
   ftr_cur_ratio = ((double)ftr_cur * 100) / MAP_SIZE;
 
   calculate_frontier_proximity(&cur_prox);
+#endif
 
   last_ms = cur_ms;
   last_execs = total_execs;
@@ -4578,25 +4463,32 @@ static void show_stats(void) {
 
   SAYF(bV bSTOP "        trim : " cRST "%-37s " bSTG bVR bH20 bH2 bH2 bRB "\n", tmp);
 
+#if FRONTIERS > FRONTIERS_NONE
+
   SAYF(bVR bH cCYA bSTOP " frontier coverage " cRST bSTG bH30 bH2 bH bVL "\n");
-       //bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, tmp);
 
   /* Show frontier information */
 
   //TODO: make sure console size is big enough.
 
   //TODO: colors?
-  sprintf(tmp, "%.3f / %.3f", vis_ftr_cur_ratio, vis_ftr_ratio);
+  sprintf(tmp, "%.3f", vis_ftr_cur_ratio);
   SAYF(bV bSTOP " visited-frontier ratio : " cRST "%-27s" bSTG bV "\n", tmp);
 
-  sprintf(tmp, "%d / %d / %d", cur_prox, queue_cur->cur_prox, max_prox);
+  sprintf(tmp, "%d / %d", cur_prox, queue_cur->cur_prox);
   SAYF(bV bSTOP "       proximity degree : " cRST "%-27s" bSTG bV "\n", tmp);
 
   sprintf(tmp, "%.2f ± %.2f", cap_prox_total / prox_count, sqrt(cap_prox_dev / prox_count));
   SAYF(bV bSTOP "      average proximity : " cRST "%-28s" bSTG bV "\n", tmp);
 
-  sprintf(tmp, "%.2f%% / %.2f%%", ftr_cur_ratio, ftr_all_ratio);
+  sprintf(tmp, "%.2f%%", ftr_cur_ratio);
   SAYF(bV bSTOP "              frontiers : " cRST "%-27s" bSTG bV bSTOP, tmp);
+
+#else
+
+  SAYF(bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, tmp);
+
+#endif
 
   /* Provide some CPU utilization stats. */
 
@@ -4996,7 +4888,7 @@ static u32 choose_block_len(u32 limit) {
 static u32 calculate_score(struct queue_entry* q) {
 
   u32 avg_exec_us = total_cal_us / total_cal_cycles;
-  //u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
+  u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
   u32 avg_proximity = (u32)(cap_prox_total / prox_count);
   u32 perf_score = 100;
 
@@ -5004,13 +4896,13 @@ static u32 calculate_score(struct queue_entry* q) {
      global average. Multiplier ranges from 0.1x to 3x. Fast inputs are
      less expensive to fuzz, so we're giving them more air time. */
 
-  if (q->exec_us * 0.1 > avg_exec_us) perf_score = 10;
-  else if (q->exec_us * 0.25 > avg_exec_us) perf_score = 25;
-  else if (q->exec_us * 0.5 > avg_exec_us) perf_score = 50;
-  else if (q->exec_us * 0.75 > avg_exec_us) perf_score = 75;
-  else if (q->exec_us * 4 < avg_exec_us) perf_score = 300;
-  else if (q->exec_us * 3 < avg_exec_us) perf_score = 200;
-  else if (q->exec_us * 2 < avg_exec_us) perf_score = 150;
+//  if (q->exec_us * 0.1 > avg_exec_us) perf_score = 10;
+//  else if (q->exec_us * 0.25 > avg_exec_us) perf_score = 25;
+//  else if (q->exec_us * 0.5 > avg_exec_us) perf_score = 50;
+//  else if (q->exec_us * 0.75 > avg_exec_us) perf_score = 75;
+//  else if (q->exec_us * 4 < avg_exec_us) perf_score = 300;
+//  else if (q->exec_us * 3 < avg_exec_us) perf_score = 200;
+//  else if (q->exec_us * 2 < avg_exec_us) perf_score = 150;
 
   /* Adjust score based on the proximity of the frontiers that this input case
      exposes. The input cases more exposed to the frontiers will probably give
@@ -5026,12 +4918,12 @@ static u32 calculate_score(struct queue_entry* q) {
   /* Adjust score based on bitmap size. The working theory is that better
      coverage translates to better targets. Multiplier from 0.25x to 3x. */
 
-//  if (q->bitmap_size * 0.3 > avg_bitmap_size) perf_score *= 3;
-//  else if (q->bitmap_size * 0.5 > avg_bitmap_size) perf_score *= 2;
-//  else if (q->bitmap_size * 0.75 > avg_bitmap_size) perf_score *= 1.5;
-//  else if (q->bitmap_size * 3 < avg_bitmap_size) perf_score *= 0.25;
-//  else if (q->bitmap_size * 2 < avg_bitmap_size) perf_score *= 0.5;
-//  else if (q->bitmap_size * 1.5 < avg_bitmap_size) perf_score *= 0.75;
+  if (q->bitmap_size * 0.3 > avg_bitmap_size) perf_score *= 3;
+  else if (q->bitmap_size * 0.5 > avg_bitmap_size) perf_score *= 2;
+  else if (q->bitmap_size * 0.75 > avg_bitmap_size) perf_score *= 1.5;
+  else if (q->bitmap_size * 3 < avg_bitmap_size) perf_score *= 0.25;
+  else if (q->bitmap_size * 2 < avg_bitmap_size) perf_score *= 0.5;
+  else if (q->bitmap_size * 1.5 < avg_bitmap_size) perf_score *= 0.75;
 
   /* Adjust score based on handicap. Handicap is proportional to how late
      in the game we learned about this path. Latecomers are allowed to run
@@ -5282,8 +5174,6 @@ static u8 fuzz_one(char** argv) {
   if (queue_cur->depth > 1) return 1;
 
 #else
-
-  calculate_frontier_proximity(&queue_cur->cur_prox);
 
   if (pending_favored) {
 
